@@ -1,96 +1,115 @@
-﻿#Requires AutoHotkey v2.0
+#Requires AutoHotkey v2.0
+#SingleInstance Force
 
-^!t::
-{
-    path := ""
+^!t::OpenWindowsTerminalHere()
 
-    if IsExplorerActive() {
-        path := GetExplorerActiveTabPath()
-    } else if IsDesktopActive() {
-        path := A_Desktop
+OpenWindowsTerminalHere() {
+    path := GetCurrentFolder()
+
+    try {
+        if (path != "" && DirExist(path)) {
+            ; Pass the folder as the process working directory instead of
+            ; interpolating it into the command line.
+            Run "wt.exe -d .", path
+        } else {
+            Run "wt.exe"
+        }
+    } catch Error as err {
+        MsgBox(
+            "Windows Terminal을 실행할 수 없습니다.`n`n" err.Message,
+            "Windows Terminal 실행 실패",
+            "Iconx"
+        )
     }
-
-    path := NormalizeDir(path)
-
-    if (path != "" && DirExist(path)) {
-        dirArg := MakeWtDirArg(path)              ; D:\  -> D:\. 로 바꿔 파싱 이슈 회피
-        cmd := Format('wt.exe -d "{}"', dirArg)
-        Run cmd, path                              ; working directory도 같이 지정
-    } else {
-        Run "wt.exe"                               ; 기존 폴백 유지
-    }
 }
 
-IsExplorerActive() {
-    return WinActive("ahk_class CabinetWClass") || WinActive("ahk_class ExploreWClass")
-}
-
-IsDesktopActive() {
-    return WinActive("ahk_class Progman") || WinActive("ahk_class WorkerW")
-}
-
-NormalizeDir(p) {
-    if (p = "")
+GetCurrentFolder() {
+    activeHwnd := WinExist("A")
+    if !activeHwnd
         return ""
 
-    p := StrReplace(p, "`r")
-    p := StrReplace(p, "`n")
-    p := Trim(p)
-    p := StrReplace(p, Chr(34), "")               ; 모든 " 제거
+    try activeClass := WinGetClass("ahk_id " activeHwnd)
+    catch
+        return ""
 
-    ; "D:" 같은 형태면 루트로 보정
-    if RegExMatch(p, "i)^[A-Z]:$") {
-        p .= "\"
-    }
-    return p
+    if (activeClass = "CabinetWClass" || activeClass = "ExploreWClass")
+        return GetExplorerFolder(activeHwnd)
+
+    if (activeClass = "Progman" || activeClass = "WorkerW")
+        return A_Desktop
+
+    return ""
 }
 
-MakeWtDirArg(p) {
-    ; 끝이 "\"면 따옴표 파싱이 꼬일 수 있어 ".“을 붙여 끝 "\"를 제거한 형태로 전달
-    if (p != "" && SubStr(p, -1) = "\")
-        return p "."
-    return p
-}
+GetExplorerFolder(explorerHwnd) {
+    candidates := []
 
-GetExplorerActiveTabPath() {
-    clipSaved := ClipboardAll()
-    A_Clipboard := ""
-
-    SendInput "!d"
-    Sleep 50
-    SendInput "^c"
-
-    if !ClipWait(0.6) {
-        A_Clipboard := clipSaved
+    try {
+        for window in ComObject("Shell.Application").Windows {
+            try {
+                if (Integer(window.HWND) = explorerHwnd)
+                    candidates.Push(window)
+            }
+        }
+    } catch {
         return ""
     }
 
-    raw := A_Clipboard
-    A_Clipboard := clipSaved
-
-    raw := StrReplace(raw, "`r")
-    raw := StrReplace(raw, "`n")
-    raw := Trim(raw)
-    raw := StrReplace(raw, Chr(34), "")
-
-    if (raw = "")
+    if (candidates.Length = 0)
         return ""
 
-    ; file:///C:/... 형태면 경로로 변환
-    if (InStr(raw, "file:///", true) = 1) {
-        raw := SubStr(raw, 9)
-        raw := StrReplace(raw, "/", "\")
-        raw := Trim(raw)
-        raw := StrReplace(raw, Chr(34), "")
+    activeTabHwnd := GetActiveExplorerTabHwnd(explorerHwnd)
+
+    if activeTabHwnd {
+        for window in candidates {
+            if (GetExplorerTabHwnd(window) = activeTabHwnd)
+                return GetFilesystemFolderPath(window)
+        }
     }
 
-    ; 가상 경로는 실패 처리해서 폴백으로 넘김
-    if RegExMatch(raw, "i)^(shell:|ms-)")
+    ; A single candidate is unambiguous on Windows 10 and on a one-tab window.
+    if (candidates.Length = 1)
+        return GetFilesystemFolderPath(candidates[1])
+
+    ; Multiple tabs exist but the active one could not be identified.
+    ; Returning no path is safer than opening in an inactive tab's folder.
+    return ""
+}
+
+GetActiveExplorerTabHwnd(explorerHwnd) {
+    try return ControlGetHwnd(
+        "ShellTabWindowClass1",
+        "ahk_id " explorerHwnd
+    )
+    catch
+        return 0
+}
+
+GetExplorerTabHwnd(window) {
+    static IID_IShellBrowser := "{000214E2-0000-0000-C000-000000000046}"
+
+    try {
+        shellBrowser := ComObjQuery(
+            window,
+            IID_IShellBrowser,
+            IID_IShellBrowser
+        )
+        if !shellBrowser
+            return 0
+
+        tabHwnd := 0
+        ComCall(3, shellBrowser, "ptr*", &tabHwnd)
+        return tabHwnd
+    } catch {
+        return 0
+    }
+}
+
+GetFilesystemFolderPath(window) {
+    try {
+        path := window.Document.Folder.Self.Path
+        return (path != "" && DirExist(path)) ? path : ""
+    } catch {
         return ""
-
-    ; 드라이브/UNC 경로만 추출
-    if RegExMatch(raw, "i)([A-Z]:(?:\\.*)?|\\\\[^\\]+\\.*)", &m)
-        return m[1]
-
-    return raw
+    }
 }
